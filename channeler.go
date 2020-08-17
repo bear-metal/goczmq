@@ -26,6 +26,7 @@ type Channeler struct {
 	commandChan chan<- string
 	SendChan    chan<- [][]byte
 	RecvChan    <-chan [][]byte
+	MonitorChan <-chan [][]byte
 	ErrChan     <-chan error
 	errChan     chan<- error
 	destroyed   bool
@@ -56,9 +57,17 @@ func (c *Channeler) Unsubscribe(topic string) {
 	c.commandChan <- fmt.Sprintf("unsubscribe %s", topic)
 }
 
+// Monitor socket events
+func (c *Channeler) Monitor(events []string) {
+	if c.destroyed {
+		return
+	}
+	c.commandChan <- fmt.Sprintf("monitor %s", strings.Join(events, " "))
+}
+
 // actor is a routine that handles communication with
 // the zeromq socket.
-func (c *Channeler) actor(recvChan chan<- [][]byte, options []SockOption) {
+func (c *Channeler) actor(recvChan chan<- [][]byte, monitorChan chan<- [][]byte, options []SockOption) {
 	pipe, err := NewPair(fmt.Sprintf(">%s", c.commandAddr))
 
 	if err != nil {
@@ -67,6 +76,7 @@ func (c *Channeler) actor(recvChan chan<- [][]byte, options []SockOption) {
 	}
 	defer pipe.Destroy()
 	defer close(recvChan)
+	defer close(monitorChan)
 
 	pull, err := NewPull(c.proxyAddr)
 	if err != nil {
@@ -111,6 +121,14 @@ func (c *Channeler) actor(recvChan chan<- [][]byte, options []SockOption) {
 		return
 	}
 
+	var monitor *Monitor
+	defer func() {
+		if monitor != nil {
+			monitor.Destroy()
+		}
+	}()
+	var monitorSocket *Sock
+
 	poller, err := NewPoller(sock, pull, pipe)
 	if err != nil {
 		c.errChan <- err
@@ -148,6 +166,44 @@ func (c *Channeler) actor(recvChan chan<- [][]byte, options []SockOption) {
 				topic := string(cmd[1])
 				sock.SetOption(SockSetUnsubscribe(topic))
 				pipe.SendMessage([][]byte{[]byte("ok")})
+			case "monitor":
+				events := cmd[1:]
+
+				if monitor != nil {
+					c.errChan <- fmt.Errorf("Can't initialize monitor more than once")
+					goto ExitActor
+				}
+
+				monitor = NewMonitor(sock)
+
+				for _, event := range events {
+					err := monitor.Listen(string(event))
+					if err != nil {
+						c.errChan <- err
+						goto ExitActor
+					}
+				}
+
+				// err := monitor.Verbose()
+				// if err != nil {
+				// 	c.errChan <- err
+				// 	goto ExitActor
+				// }
+
+				err = monitor.Start()
+				if err != nil {
+					c.errChan <- err
+					goto ExitActor
+				}
+
+				monitorSocket = monitor.Socket()
+				err = poller.Add(monitorSocket)
+				if err != nil {
+					c.errChan <- err
+					goto ExitActor
+				}
+
+				pipe.SendMessage([][]byte{[]byte("ok")})
 			}
 
 		case sock:
@@ -157,6 +213,14 @@ func (c *Channeler) actor(recvChan chan<- [][]byte, options []SockOption) {
 				goto ExitActor
 			}
 			recvChan <- msg
+
+		case monitorSocket:
+			msg, err := monitorSocket.RecvMessage()
+			if err != nil {
+				c.errChan <- err
+				goto ExitActor
+			}
+			monitorChan <- msg
 
 		case pull:
 			msg, err := pull.RecvMessage()
@@ -241,6 +305,7 @@ func newChanneler(sockType int, endpoints string, subscribe []string, options []
 	commandChan := make(chan string)
 	sendChan := make(chan [][]byte)
 	recvChan := make(chan [][]byte)
+	monitorChan := make(chan [][]byte)
 	errChan := make(chan error)
 
 	C.Sock_init()
@@ -251,6 +316,7 @@ func newChanneler(sockType int, endpoints string, subscribe []string, options []
 		commandChan: commandChan,
 		SendChan:    sendChan,
 		RecvChan:    recvChan,
+		MonitorChan: monitorChan,
 		ErrChan:     errChan,
 		errChan:     errChan,
 	}
@@ -263,7 +329,7 @@ func newChanneler(sockType int, endpoints string, subscribe []string, options []
 	}
 
 	go c.channeler(commandChan, sendChan)
-	go c.actor(recvChan, options)
+	go c.actor(recvChan, monitorChan, options)
 
 	return c
 }
