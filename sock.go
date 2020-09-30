@@ -285,13 +285,14 @@ func (s *Sock) Pollout() bool {
 // a multi-part message
 func (s *Sock) SendFrame(data []byte, flags int) error {
 	var rc C.int
+	var err error
 	if len(data) == 0 {
-		rc = C.Sock_sendframe(s.zsockT, nil, C.size_t(0), C.int(flags))
+		rc, err = C.Sock_sendframe(s.zsockT, nil, C.size_t(0), C.int(flags))
 	} else {
-		rc = C.Sock_sendframe(s.zsockT, unsafe.Pointer(&data[0]), C.size_t(len(data)), C.int(flags))
+		rc, err = C.Sock_sendframe(s.zsockT, unsafe.Pointer(&data[0]), C.size_t(len(data)), C.int(flags))
 	}
 	if rc == C.int(-1) {
-		return ErrSendFrame
+		return err
 	}
 	return nil
 }
