@@ -142,6 +142,9 @@ func (c *Channeler) actor(recvChan chan<- [][]byte, monitorChan chan<- [][]byte,
 			c.errChan <- err
 			goto ExitActor
 		}
+		if s == nil {
+			continue
+		}
 		switch s {
 		case pipe:
 			cmd, err := pipe.RecvMessage()
